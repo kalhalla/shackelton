@@ -271,7 +271,7 @@ body.cine-2d-active .cam-buttons { display: none; }
   pointer-events: none;
 }
 .title-screen .title-text {
-  font-size: clamp(64px, 13vw, 168px);
+  font-size: clamp(32px, 6.5vw, 84px);
   letter-spacing: 0.22em;
   font-weight: 300;
   margin-bottom: 80px;
@@ -1469,20 +1469,12 @@ body.cine-2d-active .cam-buttons { display: none; }
     bigRock(xPos, zPos, sx, sy, sz, rng(i + 1500)*6.28, mat, false);
     if (sy > 1.0 && r < 55) addCollider(xPos, zPos, Math.max(sx, sz) * 0.75, sy * 1.1);
   }
-  // Surface stippling — small bumps for visual texture
-  for (let i = 0; i < 200; i++) {
-    const a = rng(i + 6000) * Math.PI * 2;
-    const rd = 28 + rng(i + 6100) * 100;
-    const x = Math.cos(a)*rd, z = Math.sin(a)*rd;
-    const sz = 0.08 + rng(i + 6200) * 0.16;
-    const stone = new THREE.Mesh(
-      new THREE.IcosahedronGeometry(sz, 0),
-      rng(i + 6300) < 0.5 ? M.rockMid : M.rockLight
-    );
-    stone.position.set(x, outerHeight(x, z) + sz * 0.4, z);
-    stone.castShadow = true;
-    root.add(stone);
-  }
+  // (Surface stippling stones removed — 200 small bumps at radii
+  // 28–128m were left over from the old smaller-crater scale. Placed
+  // via outerHeight(x,z) which returns 0 inside the rim, they ended
+  // up floating at y=0 — exactly 35m above the new crater floor.
+  // Outer plain texture comes from the heightfield itself plus the
+  // hand-placed boulders above; this loop is no longer needed.)
 
   // (Hand-placed secondary craters removed — the outer heightfield
   // now carries hundreds of crater depressions baked into vertex
@@ -1714,13 +1706,11 @@ body.cine-2d-active .cam-buttons { display: none; }
   // ASSET LOADING — astronaut GLB + palette texture from external files
   //
   // NOTE ON SERVING: Browsers block fetch() on file:// URLs for security.
-  // To run this HTML, serve it over HTTP. Quickest options:
-  //   python3 -m http.server 8000
-  //   npx serve .
-  // Then open http://localhost:8000/shackleton.html
+  // To run this HTML, serve it over HTTP. Hosting via Vercel/Netlify
+  // or a local web server both work.
   //
   // Expected layout (paths relative to this HTML):
-  //   shackleton.html
+  //   index.html (or shackleton.html)
   //   assets/astronaut.glb
   //   assets/palette.png
   // ============================================================
@@ -1743,22 +1733,15 @@ body.cine-2d-active .cam-buttons { display: none; }
       throw new Error('GLTFLoader not loaded — check CDN access');
     }
 
-    // Texture — load palette PNG from external file.
-    // The mesh has UV coordinates expecting a palette texture, but it
-    // also has vertex colors baked in (COLOR_0, COLOR_1). If the palette
-    // is missing, we fall back to vertex-color-only rendering rather
-    // than crashing the game. Astronaut may look different but is visible.
+    // Texture — palette PNG. Optional: if missing, fall back to vertex
+    // colors (the mesh has COLOR_0 baked in, so the astronaut still
+    // renders, possibly slightly different from intended).
     sub.textContent = 'LOADING TEXTURE…';
     const texLoader = new THREE.TextureLoader();
     let palette = null;
     try {
       palette = await new Promise((resolve, reject) => {
-        texLoader.load(
-          ASSET_PATHS.palettePNG,
-          (tex) => resolve(tex),
-          undefined,
-          (err) => reject(err)
-        );
+        texLoader.load(ASSET_PATHS.palettePNG, resolve, undefined, reject);
       });
       palette.needsUpdate = true;
       palette.magFilter = THREE.NearestFilter;
@@ -1767,7 +1750,7 @@ body.cine-2d-active .cam-buttons { display: none; }
       if (THREE.sRGBEncoding !== undefined) palette.encoding = THREE.sRGBEncoding;
       if (THREE.SRGBColorSpace !== undefined) palette.colorSpace = THREE.SRGBColorSpace;
     } catch (err) {
-      console.warn('Palette texture not loaded (' + ASSET_PATHS.palettePNG + ') — falling back to vertex colors. Astronaut will still render but may look different.');
+      console.warn('Palette texture not loaded (' + ASSET_PATHS.palettePNG + ') — falling back to vertex colors.');
       palette = null;
     }
 
@@ -1791,12 +1774,11 @@ body.cine-2d-active .cam-buttons { display: none; }
     // Apply material to all meshes — use MeshPhongMaterial for flatShading
     // support (Lambert doesn't have flatShading in r128). shininess:0 makes it
     // look essentially Lambert-flat with proper flat-shaded faceting.
-    // If palette texture loaded, use it (map). If not, use vertex colors
-    // (the mesh has COLOR_0 baked in).
+    // If palette texture loaded, use it (map). If not, use vertex colors.
     sub.textContent = 'APPLYING MATERIALS…';
     const astroMat = new THREE.MeshPhongMaterial({
       map: palette || null,
-      vertexColors: !palette,   // fall back to vertex colors if no texture
+      vertexColors: !palette,
       flatShading: true,
       shininess: 0,
       skinning: true
@@ -2011,6 +1993,14 @@ body.cine-2d-active .cam-buttons { display: none; }
     const targetSpeed = input.run ? RUN_SPEED : WALK_SPEED;
     const accel = player.grounded ? ACCEL_GROUND : ACCEL_AIR;
 
+    // Pure-back intent: only back arrow / S held, no strafe. In that
+    // case we walk backward in the astronaut's CURRENT facing direction
+    // instead of pivoting him to face away from the camera. The pivot
+    // behaviour was producing a spiralling "walk in a circle" because
+    // motion direction is camera-relative and the camera follows the
+    // astronaut's heading, creating a feedback loop.
+    const pureBack = input.forward < 0 && Math.abs(input.strafe) < 0.05;
+
     // During jump windup, lock horizontal motion — the astronaut is bracing
     // to push off and shouldn't slide. Friction kills any residual velocity.
     const inWindup = (jumpPhase === 'windup');
@@ -2018,6 +2008,18 @@ body.cine-2d-active .cam-buttons { display: none; }
       const friction = Math.exp(-GRIP * 1.5 * dt);
       player.vel.x *= friction;
       player.vel.z *= friction;
+    } else if (pureBack) {
+      // Walk backward in astronaut's local frame. Heading unchanged;
+      // the camera-follow code (separately) lerps its target to
+      // player.heading + π so the camera swings 180° around to the
+      // front of the astronaut while he retreats.
+      const bx = -Math.sin(player.heading);
+      const bz = -Math.cos(player.heading);
+      const tvx = bx * targetSpeed * 0.6;   // slower than forward walk
+      const tvz = bz * targetSpeed * 0.6;
+      player.vel.x += (tvx - player.vel.x) * Math.min(1, dt * accel);
+      player.vel.z += (tvz - player.vel.z) * Math.min(1, dt * accel);
+      // No heading update — preserves facing direction.
     } else if (inMag > 0.05) {
       // Accelerate toward target velocity
       const tvx = inX * targetSpeed;
@@ -2368,7 +2370,15 @@ body.cine-2d-active .cam-buttons { display: none; }
       !dragging && sinceDrag > 1.0 &&
       (flying || inputMag > 0.4);
     if (autoFollowActive) {
-      let delta = targetHeading - camYaw;
+      // Pure-back walk: aim camera at the FRONT of the astronaut so it
+      // swings 180° around as he retreats. Detected from current input.
+      const pureBackWalk = !flying && input
+        && input.forward < 0
+        && Math.abs(input.strafe || 0) < 0.05;
+      const followHeading = pureBackWalk
+        ? targetHeading + Math.PI
+        : targetHeading;
+      let delta = followHeading - camYaw;
       while (delta > Math.PI)  delta -= Math.PI * 2;
       while (delta < -Math.PI) delta += Math.PI * 2;
       // Walking: 1.2 rad/s. Flying: 2.4 rad/s — sharper chase.
@@ -3029,8 +3039,11 @@ body.cine-2d-active .cam-buttons { display: none; }
     // of the lateral push) — a single side thruster firing produces
     // both a force and a torque about the centre of mass, so the
     // craft simultaneously pivots and slides into the turn.
-    flyerState.heading += flyerInput.rotate * 3.5 * dt;
-    flyerState.heading += flyerInput.strafe * 2.4 * dt;
+    // Sign convention: heading -= rotate so left input (Q / left arrow)
+    // produces visible left rotation. The opposite sign was producing
+    // an inverted feel relative to the lateral push direction.
+    flyerState.heading -= flyerInput.rotate * 3.5 * dt;
+    flyerState.heading -= flyerInput.strafe * 2.4 * dt;
 
     // Integrate position
     flyerState.pos.addScaledVector(flyerState.vel, dt);
@@ -8517,12 +8530,11 @@ body.cine-2d-active .cam-buttons { display: none; }
   let cineFadeTarget = 0;
   // Map of scene image keys to image sources.
   // Original system used inline base64; those constants were deleted when
-  // the opening was rewritten and the cinematic was dead-coded. Default
-  // cine.phase is 'gameplay', so loadSceneImage() is never called at
-  // runtime — but this object literal evaluates on script load, so the
-  // values must resolve. Empty strings keep the file parsing.
-  // If cinematic is revived, swap these to 'assets/cabin.png' etc. and
-  // change loadSceneImage to use img.src directly (no base64 prefix).
+  // the opening was rewritten. Default cine.phase is 'gameplay' so
+  // loadSceneImage() is never called at runtime — but this object literal
+  // evaluates on script load, so the values must resolve. Empty strings
+  // keep the file parsing. If cinematic is revived, swap to e.g.
+  // 'assets/cabin.png' and remove the base64 prefix in loadSceneImage.
   const SCENE_IMAGES = {
     'CABIN': '',
     'HATCH': '',
