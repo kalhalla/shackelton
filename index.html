@@ -11,6 +11,27 @@ body { margin: 0; padding: 0; background: #050608; color: #e8e9ec; font-family: 
 .stage canvas { display: block; width: 100%; height: 100%; cursor: grab; }
 .stage canvas:active { cursor: grabbing; }
 .cap { position: fixed; top: 14px; left: 18px; color: #6a5530; font-size: 11px; letter-spacing: 2px; pointer-events: none; z-index: 2; }
+/* Build version tags — visible in two places. In-game: small dim
+   marker under the SHACKLETON cap. On title screen: bottom-right
+   corner so it's visible on refresh without dismissing the title.
+   Both read the same BUILD_VERSION constant from JS. */
+.cap .build-version {
+  display: block;
+  margin-top: 2px;
+  color: #4a3520;
+  font-size: 9px;
+  letter-spacing: 1.5px;
+}
+.title-screen .build-version {
+  position: absolute;
+  bottom: 14px;
+  right: 18px;
+  color: #4a4a52;
+  font-size: 10px;
+  letter-spacing: 2px;
+  font-family: 'Garamond', 'Georgia', serif;
+  opacity: 0.55;
+}
 .title { position: fixed; top: 14px; left: 50%; transform: translateX(-50%); pointer-events: none; z-index: 2; text-align: center; }
 .title .label { color: #5a4530; font-size: 9px; letter-spacing: 2px; }
 .title .body { color: #f0c674; font-size: 12px; letter-spacing: 2px; margin-top: 3px; }
@@ -271,7 +292,7 @@ body.cine-2d-active .cam-buttons { display: none; }
   pointer-events: none;
 }
 .title-screen .title-text {
-  font-size: clamp(64px, 13vw, 168px);
+  font-size: clamp(32px, 6.5vw, 84px);
   letter-spacing: 0.22em;
   font-weight: 300;
   margin-bottom: 80px;
@@ -313,6 +334,7 @@ body.cine-2d-active .cam-buttons { display: none; }
 <div class="title-screen" id="title-screen">
   <div class="title-text">SHACKLETON</div>
   <div class="title-cta">Click to begin</div>
+  <div class="build-version">—</div>
 </div>
 <div class="scene2d" id="scene2d">
   <div class="scene2d-frame" id="scene2d-frame">
@@ -367,7 +389,7 @@ body.cine-2d-active .cam-buttons { display: none; }
   <canvas id="radar-canvas" width="140" height="140" style="width:140px;height:140px;display:block;"></canvas>
 </div>
 <div class="stage" id="stage">
-  <div class="cap">SHACKLETON</div>
+  <div class="cap">SHACKLETON<span class="build-version">—</span></div>
   <div class="title">
     <div class="label">MISSION 1</div>
     <div class="body">FIRST FOOT</div>
@@ -415,6 +437,19 @@ body.cine-2d-active .cam-buttons { display: none; }
 <script>
 (function(){
   'use strict';
+
+  // ============================================================
+  // BUILD VERSION — bump this string when committing a change you
+  // want to verify landed in production. Displays on the title
+  // screen and in the top-left HUD during play. Update format is
+  // free — semver, date, or whatever's useful. The whole point is
+  // that the tag is different from the previous deploy.
+  // ============================================================
+  const BUILD_VERSION = 'v0.1.0';
+  document.querySelectorAll('.build-version').forEach(el => {
+    el.textContent = BUILD_VERSION;
+  });
+
   const stage = document.getElementById('stage');
   const $ = id => document.getElementById(id);
   let w = window.innerWidth, h = window.innerHeight;
@@ -1113,107 +1148,106 @@ body.cine-2d-active .cam-buttons { display: none; }
   root.add(innerSurface);
 
   // ============================================================
-  // CENTRAL PEAK — the multi-summit mountain dominating the floor.
-  // Off-centre so the crater has a visible *front* and *back*, and
-  // so the wreck near origin reads against the peak as backdrop.
-  // Composed of three overlapping low-poly cones at slightly
-  // different positions and heights, matching the broken-summit
-  // silhouette in the reference images. Each cone is built from
-  // custom geometry rather than ConeGeometry so per-vertex angular
-  // jitter can give the chunky-blocky lunar facets that flat
-  // shading then reveals as distinct triangle faces.
+  // CENTRAL PEAK — a tall narrow pyramid with a three-turn spiral
+  // path cut into its surface. The cone itself is too steep to climb
+  // directly (~69° slope); the path is the only practical route to
+  // the summit. Reference: Oricut-style low-poly mountain with
+  // visible polygon facets and a switchback trail wrapping the mass.
   //
   // The peak is real ground: getGroundY() consults peakHeight(x,z)
   // and returns the higher of the floor heightfield or the peak
-  // surface. The path-to-summit (climbable route, viewpoint at the
-  // top) is its own future feature; tonight the geometry exists
-  // and entities can stand on it.
+  // surface, so the player walks on the cone (where they can) and
+  // along the path (where they have to).
   // ============================================================
   const PEAK_CENTER_X = -60;
   const PEAK_CENTER_Z = 30;
-  const PEAK_SUMMITS = [
-    // {dx, dz, baseR, height} — offset from PEAK_CENTER, base
-    // radius, height above crater floor. The tallest summit is
-    // central; two smaller summits flank it at offset positions.
-    { dx:  0,    dz:   0,   baseR: 38, height: 28 },
-    { dx: 18,    dz: -10,   baseR: 26, height: 21 },
-    { dx: -14,   dz:  16,   baseR: 22, height: 17 },
-  ];
+  const PEAK_BASE_R   = 17.5;     // 35m base diameter
+  const PEAK_HEIGHT   = 45;       // 45m tall
+  const PATH_TURNS    = 3;        // spiral makes three full revolutions
+  const PATH_WIDTH    = 2.0;      // walkable width in metres
+  const PATH_RECESS   = 0.9;      // path is ~90cm sunken into cone surface
+  const PATH_TRANS    = 0.5;      // edge transition width — softens the groove walls
 
-  // Single summit's surface elevation at (worldX, worldZ), in
-  // metres above the crater floor datum (-CRATER_DEPTH). Returns
-  // 0 outside the cone's footprint. Profile is convex (concave-up):
-  // y = h * (1 - (d/R)^p) with p=1.6 gives a slope that's steep
-  // near the base and flattens toward the summit — reads as a
-  // weathered mountain rather than a sharp pyramid.
-  function summitContrib(wx, wz, s) {
-    const dx = wx - (PEAK_CENTER_X + s.dx);
-    const dz = wz - (PEAK_CENTER_Z + s.dz);
-    const d  = Math.sqrt(dx*dx + dz*dz);
-    if (d >= s.baseR) return 0;
-    const t = d / s.baseR;
-    return s.height * (1 - Math.pow(t, 1.6));
-  }
-
-  // Maximum elevation contribution from any summit at world (x,z).
-  // In overlap regions the higher summit wins, which produces a
-  // visible saddle between the summits — the multi-peak silhouette.
+  // Surface elevation at world (x, z), in metres above the crater
+  // floor datum. Returns 0 outside the footprint. Two regimes:
+  //   - on the spiral path: recessed groove the player walks on
+  //   - on the cone proper: linear pyramid surface, very steep
   function peakHeight(x, z) {
-    let h = 0;
-    for (let i = 0; i < PEAK_SUMMITS.length; i++) {
-      const c = summitContrib(x, z, PEAK_SUMMITS[i]);
-      if (c > h) h = c;
+    const dx = x - PEAK_CENTER_X;
+    const dz = z - PEAK_CENTER_Z;
+    const r  = Math.sqrt(dx*dx + dz*dz);
+    if (r >= PEAK_BASE_R) return 0;
+    // Linear cone profile (pyramidal silhouette)
+    const t = r / PEAK_BASE_R;
+    const cone = PEAK_HEIGHT * (1 - t);
+    // Spiral path angle at this radius. Path starts at θ=0 at the
+    // base (r=R) and makes PATH_TURNS full revolutions by the time
+    // it reaches the apex (r=0). Resulting angle is unbounded; we
+    // compare modulo 2π below.
+    const theta     = Math.atan2(dz, dx);
+    const pathTheta = Math.PI * 2 * PATH_TURNS * (1 - t);
+    // Shortest signed angular distance to the path centerline,
+    // wrapped to (-π, π].
+    let delta = theta - pathTheta;
+    delta -= Math.PI * 2 * Math.floor((delta + Math.PI) / (Math.PI * 2));
+    // Convert to lateral arc-length distance (path width is
+    // measured perpendicular to the climb direction, which at small
+    // radii is dominated by tangential motion — arc length is the
+    // right metric here).
+    const lateral = Math.abs(delta) * r;
+    if (lateral <= PATH_WIDTH * 0.5) {
+      // On the path — recess into cone surface
+      return Math.max(0, cone - PATH_RECESS);
     }
-    return h;
+    if (lateral <= PATH_WIDTH * 0.5 + PATH_TRANS) {
+      // Transition zone — blend recess back to cone surface so the
+      // groove walls aren't razor-sharp
+      const blend = (lateral - PATH_WIDTH * 0.5) / PATH_TRANS;
+      const recessed = Math.max(0, cone - PATH_RECESS);
+      return recessed + (cone - recessed) * blend;
+    }
+    return cone;
   }
 
-  // Build the peak mesh. Polar grid centred on the summit cluster,
-  // sampling peakHeight() at each vertex. Coarse angular resolution
-  // and chunky radial spacing keep the low-poly look. Edge ring
-  // sits exactly on the floor heightfield at peakHeight=0 so the
-  // base is flush with the surrounding floor.
+  // Build the peak mesh. Polar grid centred on the apex, sampling
+  // peakHeight() at each vertex. Higher angular resolution than
+  // the previous multi-summit version because the spiral path needs
+  // fine sampling to render cleanly — at ~2m wide and a 17.5m base,
+  // the path occupies ~13° of arc, so 64 segments (5.6° each) gives
+  // 2-3 vertices across the path at the base and is denser higher up
+  // where r is smaller.
   function buildCentralPeak() {
-    const SEGS = 16;          // chunky facets — references show ~3-5 visible per slope
-    const RINGS = 14;
-    const FOOTPRINT_R = 50;
-    const positions = [];
-    const indices = [];
-    // Centre vertex (the local apex, sampled at the summit cluster's centroid)
+    const SEGS         = 64;
+    const RINGS        = 28;
+    const FOOTPRINT_R  = PEAK_BASE_R + 0.5;   // small overlap with floor
+    const positions    = [];
+    const indices      = [];
+    // Centre vertex (apex)
     positions.push(0, peakHeight(PEAK_CENTER_X, PEAK_CENTER_Z), 0);
     for (let ring = 1; ring <= RINGS; ring++) {
-      const t = ring / RINGS;
-      const r = FOOTPRINT_R * (t * 0.4 + t * t * 0.6);
+      const t  = ring / RINGS;
+      // Quadratic bias so rings cluster near the centre — more
+      // detail high up where the spiral path is tightest.
+      const r  = FOOTPRINT_R * (t * 0.55 + t * t * 0.45);
       for (let i = 0; i < SEGS; i++) {
-        // Stronger per-vertex angular and radial jitter — breaks
-        // the perfectly-circular contour of each ring and produces
-        // the asymmetric chunky outline visible in the references.
-        const aJit = (rng(ring * 100 + i + 0.31) - 0.5) * (Math.PI * 2 / SEGS) * 0.85;
+        // Tiny angular jitter only — too much would smear the path
+        // edges. Just enough to break the perfectly-circular ring.
+        const aJit = (rng(ring * 100 + i + 0.31) - 0.5) * (Math.PI * 2 / SEGS) * 0.20;
         const a = (i / SEGS) * Math.PI * 2 + aJit;
-        const rJit = (rng(ring * 100 + i + 0.62) - 0.5) * 5.0;
-        const rr = Math.max(0, r + rJit);
-        const lx = Math.cos(a) * rr;
-        const lz = Math.sin(a) * rr;
+        const lx = Math.cos(a) * r;
+        const lz = Math.sin(a) * r;
         const wx = PEAK_CENTER_X + lx;
         const wz = PEAK_CENTER_Z + lz;
         positions.push(lx, peakHeight(wx, wz), lz);
       }
     }
-    // Centre fan — apex is vertex 0, ring vertices below it.
-    // Winding: (0, i2, i1) so face normals point outward-and-up
-    // (computed cross product (i2-0)×(i1-0) has +Y component).
+    // Centre fan — apex (vertex 0) to first ring
     for (let i = 0; i < SEGS; i++) {
       const i1 = 1 + i;
       const i2 = 1 + ((i + 1) % SEGS);
       indices.push(0, i2, i1);
     }
-    // Quad rings — winding chosen so the cross product on each
-    // triangle gives a normal pointing outward from the cone axis
-    // and upward along the slope. Verified analytically: for a
-    // generic triangle (j0, i0, i1) where i* are upper ring (closer
-    // to apex) and j* are lower ring (closer to base), the normal
-    // is (h*dz, dr*dz, 0)-ish — positive radial and positive Y,
-    // i.e. outward and up. The earlier (i0, j0, i1) winding gave
-    // the opposite normal and the peak rendered as a black mass.
+    // Quad rings — same outward-and-up winding as before
     for (let ring = 0; ring < RINGS - 1; ring++) {
       const a0 = 1 + ring * SEGS;
       const a1 = 1 + (ring + 1) * SEGS;
@@ -1222,7 +1256,6 @@ body.cine-2d-active .cam-buttons { display: none; }
         const i1 = a0 + ((i + 1) % SEGS);
         const j0 = a1 + i;
         const j1 = a1 + ((i + 1) % SEGS);
-        // (j0, i0, i1) and (j0, i1, j1) — both wound for outward normals
         indices.push(j0, i0, i1);
         indices.push(j0, i1, j1);
       }
@@ -1400,7 +1433,7 @@ body.cine-2d-active .cam-buttons { display: none; }
     // mountain). Also skip clusters near the wreck and the Flyer
     // rebuild site so those locations read as deliberately worked.
     const dPeak = Math.hypot(cx - PEAK_CENTER_X, cz - PEAK_CENTER_Z);
-    if (dPeak < 52) continue;
+    if (dPeak < PEAK_BASE_R + 6) continue;
     if (inWreckZone(cx, cz)) continue;
     if (inFlyerZone(cx, cz)) continue;
     const stonesInCluster = 4 + Math.floor(rng(c + 22200) * 6);   // 4..9
@@ -1413,7 +1446,7 @@ body.cine-2d-active .cam-buttons { display: none; }
       // Per-stone exclusion checks — a cluster center outside a zone
       // can still scatter individual stones into it.
       const sdPeak = Math.hypot(x - PEAK_CENTER_X, z - PEAK_CENTER_Z);
-      if (sdPeak < 50) continue;
+      if (sdPeak < PEAK_BASE_R + 1.5) continue;
       if (Math.hypot(x, z) > CRATER_FLOOR - 1.0) continue;
       if (inWreckZone(x, z)) continue;
       if (inFlyerZone(x, z)) continue;
@@ -1435,7 +1468,7 @@ body.cine-2d-active .cam-buttons { display: none; }
     const x = Math.cos(a) * r;
     const z = Math.sin(a) * r;
     const dPeak = Math.hypot(x - PEAK_CENTER_X, z - PEAK_CENTER_Z);
-    if (dPeak < 53) continue;
+    if (dPeak < PEAK_BASE_R + 2) continue;
     if (inWreckZone(x, z)) continue;
     if (inFlyerZone(x, z)) continue;
     const diameter = 1.2 + rng(i + 23200) * 2.5;
@@ -1469,20 +1502,12 @@ body.cine-2d-active .cam-buttons { display: none; }
     bigRock(xPos, zPos, sx, sy, sz, rng(i + 1500)*6.28, mat, false);
     if (sy > 1.0 && r < 55) addCollider(xPos, zPos, Math.max(sx, sz) * 0.75, sy * 1.1);
   }
-  // Surface stippling — small bumps for visual texture
-  for (let i = 0; i < 200; i++) {
-    const a = rng(i + 6000) * Math.PI * 2;
-    const rd = 28 + rng(i + 6100) * 100;
-    const x = Math.cos(a)*rd, z = Math.sin(a)*rd;
-    const sz = 0.08 + rng(i + 6200) * 0.16;
-    const stone = new THREE.Mesh(
-      new THREE.IcosahedronGeometry(sz, 0),
-      rng(i + 6300) < 0.5 ? M.rockMid : M.rockLight
-    );
-    stone.position.set(x, outerHeight(x, z) + sz * 0.4, z);
-    stone.castShadow = true;
-    root.add(stone);
-  }
+  // (Surface stippling stones removed — 200 small bumps at radii
+  // 28–128m were left over from the old smaller-crater scale. Placed
+  // via outerHeight(x,z) which returns 0 inside the rim, they ended
+  // up floating at y=0 — exactly 35m above the new crater floor.
+  // Outer plain texture comes from the heightfield itself plus the
+  // hand-placed boulders above; this loop is no longer needed.)
 
   // (Hand-placed secondary craters removed — the outer heightfield
   // now carries hundreds of crater depressions baked into vertex
@@ -1714,13 +1739,11 @@ body.cine-2d-active .cam-buttons { display: none; }
   // ASSET LOADING — astronaut GLB + palette texture from external files
   //
   // NOTE ON SERVING: Browsers block fetch() on file:// URLs for security.
-  // To run this HTML, serve it over HTTP. Quickest options:
-  //   python3 -m http.server 8000
-  //   npx serve .
-  // Then open http://localhost:8000/shackleton.html
+  // To run this HTML, serve it over HTTP. Hosting via Vercel/Netlify
+  // or a local web server both work.
   //
   // Expected layout (paths relative to this HTML):
-  //   shackleton.html
+  //   index.html (or shackleton.html)
   //   assets/astronaut.glb
   //   assets/palette.png
   // ============================================================
@@ -1743,22 +1766,15 @@ body.cine-2d-active .cam-buttons { display: none; }
       throw new Error('GLTFLoader not loaded — check CDN access');
     }
 
-    // Texture — load palette PNG from external file.
-    // The mesh has UV coordinates expecting a palette texture, but it
-    // also has vertex colors baked in (COLOR_0, COLOR_1). If the palette
-    // is missing, we fall back to vertex-color-only rendering rather
-    // than crashing the game. Astronaut may look different but is visible.
+    // Texture — palette PNG. Optional: if missing, fall back to vertex
+    // colors (the mesh has COLOR_0 baked in, so the astronaut still
+    // renders, possibly slightly different from intended).
     sub.textContent = 'LOADING TEXTURE…';
     const texLoader = new THREE.TextureLoader();
     let palette = null;
     try {
       palette = await new Promise((resolve, reject) => {
-        texLoader.load(
-          ASSET_PATHS.palettePNG,
-          (tex) => resolve(tex),
-          undefined,
-          (err) => reject(err)
-        );
+        texLoader.load(ASSET_PATHS.palettePNG, resolve, undefined, reject);
       });
       palette.needsUpdate = true;
       palette.magFilter = THREE.NearestFilter;
@@ -1767,7 +1783,7 @@ body.cine-2d-active .cam-buttons { display: none; }
       if (THREE.sRGBEncoding !== undefined) palette.encoding = THREE.sRGBEncoding;
       if (THREE.SRGBColorSpace !== undefined) palette.colorSpace = THREE.SRGBColorSpace;
     } catch (err) {
-      console.warn('Palette texture not loaded (' + ASSET_PATHS.palettePNG + ') — falling back to vertex colors. Astronaut will still render but may look different.');
+      console.warn('Palette texture not loaded (' + ASSET_PATHS.palettePNG + ') — falling back to vertex colors.');
       palette = null;
     }
 
@@ -1791,12 +1807,11 @@ body.cine-2d-active .cam-buttons { display: none; }
     // Apply material to all meshes — use MeshPhongMaterial for flatShading
     // support (Lambert doesn't have flatShading in r128). shininess:0 makes it
     // look essentially Lambert-flat with proper flat-shaded faceting.
-    // If palette texture loaded, use it (map). If not, use vertex colors
-    // (the mesh has COLOR_0 baked in).
+    // If palette texture loaded, use it (map). If not, use vertex colors.
     sub.textContent = 'APPLYING MATERIALS…';
     const astroMat = new THREE.MeshPhongMaterial({
       map: palette || null,
-      vertexColors: !palette,   // fall back to vertex colors if no texture
+      vertexColors: !palette,
       flatShading: true,
       shininess: 0,
       skinning: true
@@ -2011,6 +2026,14 @@ body.cine-2d-active .cam-buttons { display: none; }
     const targetSpeed = input.run ? RUN_SPEED : WALK_SPEED;
     const accel = player.grounded ? ACCEL_GROUND : ACCEL_AIR;
 
+    // Pure-back intent: only back arrow / S held, no strafe. In that
+    // case we walk backward in the astronaut's CURRENT facing direction
+    // instead of pivoting him to face away from the camera. The pivot
+    // behaviour was producing a spiralling "walk in a circle" because
+    // motion direction is camera-relative and the camera follows the
+    // astronaut's heading, creating a feedback loop.
+    const pureBack = input.forward < 0 && Math.abs(input.strafe) < 0.05;
+
     // During jump windup, lock horizontal motion — the astronaut is bracing
     // to push off and shouldn't slide. Friction kills any residual velocity.
     const inWindup = (jumpPhase === 'windup');
@@ -2018,6 +2041,18 @@ body.cine-2d-active .cam-buttons { display: none; }
       const friction = Math.exp(-GRIP * 1.5 * dt);
       player.vel.x *= friction;
       player.vel.z *= friction;
+    } else if (pureBack) {
+      // Walk backward in astronaut's local frame. Heading unchanged;
+      // the camera-follow code (separately) lerps its target to
+      // player.heading + π so the camera swings 180° around to the
+      // front of the astronaut while he retreats.
+      const bx = -Math.sin(player.heading);
+      const bz = -Math.cos(player.heading);
+      const tvx = bx * targetSpeed * 0.6;   // slower than forward walk
+      const tvz = bz * targetSpeed * 0.6;
+      player.vel.x += (tvx - player.vel.x) * Math.min(1, dt * accel);
+      player.vel.z += (tvz - player.vel.z) * Math.min(1, dt * accel);
+      // No heading update — preserves facing direction.
     } else if (inMag > 0.05) {
       // Accelerate toward target velocity
       const tvx = inX * targetSpeed;
@@ -2368,7 +2403,15 @@ body.cine-2d-active .cam-buttons { display: none; }
       !dragging && sinceDrag > 1.0 &&
       (flying || inputMag > 0.4);
     if (autoFollowActive) {
-      let delta = targetHeading - camYaw;
+      // Pure-back walk: aim camera at the FRONT of the astronaut so it
+      // swings 180° around as he retreats. Detected from current input.
+      const pureBackWalk = !flying && input
+        && input.forward < 0
+        && Math.abs(input.strafe || 0) < 0.05;
+      const followHeading = pureBackWalk
+        ? targetHeading + Math.PI
+        : targetHeading;
+      let delta = followHeading - camYaw;
       while (delta > Math.PI)  delta -= Math.PI * 2;
       while (delta < -Math.PI) delta += Math.PI * 2;
       // Walking: 1.2 rad/s. Flying: 2.4 rad/s — sharper chase.
@@ -3029,8 +3072,11 @@ body.cine-2d-active .cam-buttons { display: none; }
     // of the lateral push) — a single side thruster firing produces
     // both a force and a torque about the centre of mass, so the
     // craft simultaneously pivots and slides into the turn.
-    flyerState.heading += flyerInput.rotate * 3.5 * dt;
-    flyerState.heading += flyerInput.strafe * 2.4 * dt;
+    // Sign convention: heading -= rotate so left input (Q / left arrow)
+    // produces visible left rotation. The opposite sign was producing
+    // an inverted feel relative to the lateral push direction.
+    flyerState.heading -= flyerInput.rotate * 3.5 * dt;
+    flyerState.heading -= flyerInput.strafe * 2.4 * dt;
 
     // Integrate position
     flyerState.pos.addScaledVector(flyerState.vel, dt);
@@ -8517,12 +8563,11 @@ body.cine-2d-active .cam-buttons { display: none; }
   let cineFadeTarget = 0;
   // Map of scene image keys to image sources.
   // Original system used inline base64; those constants were deleted when
-  // the opening was rewritten and the cinematic was dead-coded. Default
-  // cine.phase is 'gameplay', so loadSceneImage() is never called at
-  // runtime — but this object literal evaluates on script load, so the
-  // values must resolve. Empty strings keep the file parsing.
-  // If cinematic is revived, swap these to 'assets/cabin.png' etc. and
-  // change loadSceneImage to use img.src directly (no base64 prefix).
+  // the opening was rewritten. Default cine.phase is 'gameplay' so
+  // loadSceneImage() is never called at runtime — but this object literal
+  // evaluates on script load, so the values must resolve. Empty strings
+  // keep the file parsing. If cinematic is revived, swap to e.g.
+  // 'assets/cabin.png' and remove the base64 prefix in loadSceneImage.
   const SCENE_IMAGES = {
     'CABIN': '',
     'HATCH': '',
