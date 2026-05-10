@@ -11,16 +11,25 @@ body { margin: 0; padding: 0; background: #050608; color: #e8e9ec; font-family: 
 .stage canvas { display: block; width: 100%; height: 100%; cursor: grab; }
 .stage canvas:active { cursor: grabbing; }
 .cap { position: fixed; top: 14px; left: 18px; color: #6a5530; font-size: 11px; letter-spacing: 2px; pointer-events: none; z-index: 2; }
-/* Build version tags — visible in two places. In-game: small dim
-   marker under the SHACKLETON cap. On title screen: bottom-right
-   corner so it's visible on refresh without dismissing the title.
-   Both read the same BUILD_VERSION constant from JS. */
-.cap .build-version {
-  display: block;
-  margin-top: 2px;
-  color: #4a3520;
-  font-size: 9px;
-  letter-spacing: 1.5px;
+/* Build version. Two locations:
+   - Top-right HUD banner: prominent, dark background, visible at all
+     times during play. Update BUILD_VERSION at top of script to bump.
+   - Title screen: bottom-right corner, visible on refresh. */
+.build-version-hud {
+  position: fixed;
+  top: 14px;
+  right: 18px;
+  color: #f0c674;
+  background: rgba(15, 18, 30, 0.75);
+  border: 0.5px solid #4a3520;
+  border-radius: 4px;
+  padding: 5px 11px;
+  font-size: 13px;
+  letter-spacing: 2px;
+  font-weight: 500;
+  pointer-events: none;
+  z-index: 5;
+  font-variant-numeric: tabular-nums;
 }
 .title-screen .build-version {
   position: absolute;
@@ -389,7 +398,8 @@ body.cine-2d-active .cam-buttons { display: none; }
   <canvas id="radar-canvas" width="140" height="140" style="width:140px;height:140px;display:block;"></canvas>
 </div>
 <div class="stage" id="stage">
-  <div class="cap">SHACKLETON<span class="build-version">—</span></div>
+  <div class="cap">SHACKLETON</div>
+  <div class="build-version-hud build-version">—</div>
   <div class="title">
     <div class="label">MISSION 1</div>
     <div class="body">FIRST FOOT</div>
@@ -445,7 +455,7 @@ body.cine-2d-active .cam-buttons { display: none; }
   // free — semver, date, or whatever's useful. The whole point is
   // that the tag is different from the previous deploy.
   // ============================================================
-  const BUILD_VERSION = 'v0.1.4';
+  const BUILD_VERSION = 'v0.1.5';
   document.querySelectorAll('.build-version').forEach(el => {
     el.textContent = BUILD_VERSION;
   });
@@ -1176,82 +1186,82 @@ body.cine-2d-active .cam-buttons { display: none; }
   // Surface elevation at world (x, z), in metres above the crater
   // floor datum. Three regimes:
   //   - inside SUMMIT_R: flat platform at PEAK_HEIGHT
-  //   - on the spiral path footprint: raised ribbon top
-  //     (cone-at-path-centerline + PATH_RAISE)
-  //   - on the cone proper: linear pyramid surface
-  // Cone is too steep to walk straight up (53° > 50° slope cutoff);
-  // the path is the only practical route to the summit.
+  //   - on the spiral path: terraced flat shelf at the cone height
+  //     at the path's centerline radius for this angle
+  //   - elsewhere: smooth linear cone profile
+  // The path is a *terraced* shelf — flat across its radial width,
+  // sloping up only along the path direction. This matches a real
+  // switchback path. Cone above the shelf is a cliff; cone below is
+  // a drop. Both edges register as too-steep with the slope cutoff.
   function peakHeight(x, z) {
     const dx = x - PEAK_CENTER_X;
     const dz = z - PEAK_CENTER_Z;
     const r  = Math.sqrt(dx*dx + dz*dz);
     if (r >= PEAK_BASE_R) return 0;
     if (r <= SUMMIT_R)    return PEAK_HEIGHT;
-    // Linear cone profile (pyramidal silhouette)
-    const t    = r / PEAK_BASE_R;
-    const cone = PEAK_HEIGHT * (1 - t);
-    // Spiral path. Path centerline goes from r=PEAK_BASE_R at the
-    // base to r=SUMMIT_R at the summit, making PATH_TURNS revolutions.
-    // pathFrac is 0 at base, 1 at summit (parameter along the spiral).
-    const pathFrac  = (PEAK_BASE_R - r) / (PEAK_BASE_R - SUMMIT_R);
-    const pathTheta = Math.PI * 2 * PATH_TURNS * pathFrac;
-    const theta     = Math.atan2(dz, dx);
-    let delta = theta - pathTheta;
-    delta -= Math.PI * 2 * Math.floor((delta + Math.PI) / (Math.PI * 2));
-    const lateral = Math.abs(delta) * r;
-    if (lateral <= PATH_WIDTH * 0.5) {
-      // Inside path footprint — return raised ribbon top, computed
-      // from cone height AT THE PATH CENTERLINE (constant across
-      // the cross-section, so the path top is flat radially).
-      // Path centerline cone height at this t-value:
-      const centerR = PEAK_BASE_R - (PEAK_BASE_R - SUMMIT_R) * pathFrac;
-      const centerCone = PEAK_HEIGHT * (1 - centerR / PEAK_BASE_R);
-      return centerCone + PATH_RAISE;
+    const cone = PEAK_HEIGHT * (1 - r / PEAK_BASE_R);
+    // Path crosses every angle PATH_TURNS+1 times — once per
+    // winding from base to summit. For angle θ in [0, 2π), the
+    // crossings are at radii where pathFrac(r) = (θ + 2πk)/(2π·N)
+    // for k = 0..PATH_TURNS. Find the crossing nearest to r.
+    const theta    = Math.atan2(dz, dx);
+    const thetaN   = ((theta % (Math.PI * 2)) + Math.PI * 2) % (Math.PI * 2);
+    const totalAng = Math.PI * 2 * PATH_TURNS;
+    let bestRP   = 0;
+    let bestDist = Infinity;
+    for (let k = 0; k <= PATH_TURNS; k++) {
+      const a = thetaN + Math.PI * 2 * k;
+      if (a > totalAng + 1e-6) break;
+      const pathFrac = a / totalAng;
+      const rP = PEAK_BASE_R - (PEAK_BASE_R - SUMMIT_R) * pathFrac;
+      const d  = Math.abs(r - rP);
+      if (d < bestDist) { bestDist = d; bestRP = rP; }
+    }
+    if (bestDist < PATH_WIDTH * 0.5) {
+      // On a path winding — flat shelf at the cone height where
+      // the path centerline crosses this angle
+      return PEAK_HEIGHT * (1 - bestRP / PEAK_BASE_R);
     }
     return cone;
   }
 
-  // Build the peak as a single BufferGeometry combining:
-  //   - cone polar grid (40 segments × 14 rings, smooth cone)
-  //   - raised ribbon along the spiral path (90 sections, 4 verts
-  //     each: outer-bottom, outer-top, inner-top, inner-bottom)
-  // Total ~1700 triangles, well under the 2000-face budget.
-  // One mesh, one material, one draw call.
+  // Build the peak as a single BufferGeometry. Polar grid samples
+  // peakHeight() directly, so the terraced spiral path is part of
+  // the mesh — visible as flat shelves between cone slopes. Higher
+  // ring count than before so the path width (4m) covers 2-3 rings
+  // and reads as a clear terrace.
   function buildCentralPeak() {
-    const SEGS    = 40;
-    const RINGS   = 14;
+    const SEGS  = 48;
+    const RINGS = 24;
     const positions = [];
     const indices   = [];
-
-    // ---- CONE POLAR GRID ----
     // Apex centre vertex
     positions.push(0, PEAK_HEIGHT, 0);
-    // Ring vertices — sampling smooth cone height (NOT peakHeight,
-    // which would dip into the path; the ribbon is layered on top
-    // separately). Mild radial jitter for low-poly character.
-    for (let ring = 1; ring <= RINGS; ring++) {
-      const tt   = ring / RINGS;
-      const r    = SUMMIT_R + (PEAK_BASE_R - SUMMIT_R) * tt;
-      // Smooth cone height at this radius
-      const h = (r >= PEAK_BASE_R) ? 0
-              : (r <= SUMMIT_R)    ? PEAK_HEIGHT
-              : PEAK_HEIGHT * (1 - r / PEAK_BASE_R);
+    // Ring 0 sits exactly at SUMMIT_R, all vertices at PEAK_HEIGHT —
+    // creates the flat platform via the apex fan. Subsequent rings
+    // step outward toward the base.
+    for (let ring = 0; ring <= RINGS; ring++) {
+      const tt = ring / RINGS;
+      const r  = SUMMIT_R + (PEAK_BASE_R - SUMMIT_R) * tt;
       for (let i = 0; i < SEGS; i++) {
-        const aJit = (rng(ring * 37 + i + 0.31) - 0.5) * (Math.PI * 2 / SEGS) * 0.30;
+        const aJit = (rng(ring * 37 + i + 0.31) - 0.5) * (Math.PI * 2 / SEGS) * 0.20;
         const a = (i / SEGS) * Math.PI * 2 + aJit;
-        const rJit = (rng(ring * 53 + i + 0.62) - 0.5) * 0.6;
-        const rr = Math.max(SUMMIT_R, r + rJit);
+        const rJit = (rng(ring * 53 + i + 0.62) - 0.5) * 0.4;
+        const rr = Math.max(SUMMIT_R, Math.min(PEAK_BASE_R, r + rJit));
+        const wx = PEAK_CENTER_X + Math.cos(a) * rr;
+        const wz = PEAK_CENTER_Z + Math.sin(a) * rr;
+        const h  = peakHeight(wx, wz);
         positions.push(Math.cos(a) * rr, h, Math.sin(a) * rr);
       }
     }
-    // Apex fan
+    // Apex fan (apex vertex 0 → ring 0 verts at SUMMIT_R)
     for (let i = 0; i < SEGS; i++) {
       const i1 = 1 + i;
       const i2 = 1 + ((i + 1) % SEGS);
       indices.push(0, i2, i1);
     }
-    // Ring quads
-    for (let ring = 0; ring < RINGS - 1; ring++) {
+    // Ring quads — RINGS+1 rings means RINGS quad-bands
+    for (let ring = 0; ring < RINGS; ring++) {
       const a0 = 1 + ring * SEGS;
       const a1 = 1 + (ring + 1) * SEGS;
       for (let i = 0; i < SEGS; i++) {
@@ -1263,60 +1273,6 @@ body.cine-2d-active .cam-buttons { display: none; }
         indices.push(j0, i1, j1);
       }
     }
-
-    // ---- RAISED RIBBON PATH ----
-    // Walk parameter t from 0 (base) to 1 (summit). At each t,
-    // compute the radial cross-section of the ribbon: 4 vertices
-    // (outer-bottom, outer-top, inner-top, inner-bottom). Connect
-    // adjacent cross-sections with quads on top, outer side, inner
-    // side. Bottom is hidden against the cone surface so omitted.
-    const PATH_SEGS = 96;          // 32 per turn, 3 turns
-    const ribbonStart = positions.length / 3;
-    for (let s = 0; s <= PATH_SEGS; s++) {
-      const t = s / PATH_SEGS;
-      // Path centerline at parameter t
-      const r       = PEAK_BASE_R - (PEAK_BASE_R - SUMMIT_R) * t;
-      const theta   = Math.PI * 2 * PATH_TURNS * t;
-      const cosT    = Math.cos(theta);
-      const sinT    = Math.sin(theta);
-      const centerCone = PEAK_HEIGHT * (1 - r / PEAK_BASE_R);
-      const topY    = centerCone + PATH_RAISE;
-      // Cross-section radii (outer farther from centre, inner closer)
-      const rOut    = r + PATH_WIDTH * 0.5;
-      const rIn     = r - PATH_WIDTH * 0.5;
-      // Cone heights at the cross-section edges. The outer bottom
-      // sits ON the cone surface; the inner bottom sits at the same
-      // cone surface (which is HIGHER than topY in steep cones —
-      // visually the ribbon's inner edge gets buried in the slope,
-      // reading as a path cut into the mountainside).
-      const hOutBot = (rOut >= PEAK_BASE_R) ? 0
-                    : PEAK_HEIGHT * (1 - rOut / PEAK_BASE_R) + 0.05;  // tiny lift to avoid z-fight
-      const hInBot  = (rIn  <= SUMMIT_R)    ? PEAK_HEIGHT
-                    : PEAK_HEIGHT * (1 - rIn  / PEAK_BASE_R) + 0.05;
-      // Position the four cross-section vertices
-      const xOut = cosT * rOut, zOut = sinT * rOut;
-      const xIn  = cosT * rIn,  zIn  = sinT * rIn;
-      // Order: 0=outer-bottom, 1=outer-top, 2=inner-top, 3=inner-bottom
-      positions.push(xOut, hOutBot, zOut);   // 4s + 0
-      positions.push(xOut, topY,    zOut);   // 4s + 1
-      positions.push(xIn,  topY,    zIn);    // 4s + 2
-      positions.push(xIn,  hInBot,  zIn);    // 4s + 3
-    }
-    // Connect adjacent cross-sections
-    for (let s = 0; s < PATH_SEGS; s++) {
-      const a = ribbonStart + s * 4;
-      const b = ribbonStart + (s + 1) * 4;
-      // Top face (a1, a2 ↔ b1, b2)
-      indices.push(a + 1, a + 2, b + 2);
-      indices.push(a + 1, b + 2, b + 1);
-      // Outer side (a0, a1 ↔ b0, b1)
-      indices.push(a + 0, a + 1, b + 1);
-      indices.push(a + 0, b + 1, b + 0);
-      // Inner side (a2, a3 ↔ b2, b3)
-      indices.push(a + 2, a + 3, b + 3);
-      indices.push(a + 2, b + 3, b + 2);
-    }
-
     const geom = new THREE.BufferGeometry();
     geom.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
     geom.setIndex(indices);
