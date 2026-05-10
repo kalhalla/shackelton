@@ -11,16 +11,25 @@ body { margin: 0; padding: 0; background: #050608; color: #e8e9ec; font-family: 
 .stage canvas { display: block; width: 100%; height: 100%; cursor: grab; }
 .stage canvas:active { cursor: grabbing; }
 .cap { position: fixed; top: 14px; left: 18px; color: #6a5530; font-size: 11px; letter-spacing: 2px; pointer-events: none; z-index: 2; }
-/* Build version tags — visible in two places. In-game: small dim
-   marker under the SHACKLETON cap. On title screen: bottom-right
-   corner so it's visible on refresh without dismissing the title.
-   Both read the same BUILD_VERSION constant from JS. */
-.cap .build-version {
-  display: block;
-  margin-top: 2px;
-  color: #4a3520;
-  font-size: 9px;
-  letter-spacing: 1.5px;
+/* Build version. Two locations:
+   - Top-right HUD banner: prominent, dark background, visible at all
+     times during play. Update BUILD_VERSION at top of script to bump.
+   - Title screen: bottom-right corner, visible on refresh. */
+.build-version-hud {
+  position: fixed;
+  top: 14px;
+  right: 18px;
+  color: #f0c674;
+  background: rgba(15, 18, 30, 0.75);
+  border: 0.5px solid #4a3520;
+  border-radius: 4px;
+  padding: 5px 11px;
+  font-size: 13px;
+  letter-spacing: 2px;
+  font-weight: 500;
+  pointer-events: none;
+  z-index: 5;
+  font-variant-numeric: tabular-nums;
 }
 .title-screen .build-version {
   position: absolute;
@@ -389,7 +398,8 @@ body.cine-2d-active .cam-buttons { display: none; }
   <canvas id="radar-canvas" width="140" height="140" style="width:140px;height:140px;display:block;"></canvas>
 </div>
 <div class="stage" id="stage">
-  <div class="cap">SHACKLETON<span class="build-version">—</span></div>
+  <div class="cap">SHACKLETON</div>
+  <div class="build-version-hud build-version">—</div>
   <div class="title">
     <div class="label">MISSION 1</div>
     <div class="body">FIRST FOOT</div>
@@ -445,7 +455,7 @@ body.cine-2d-active .cam-buttons { display: none; }
   // free — semver, date, or whatever's useful. The whole point is
   // that the tag is different from the previous deploy.
   // ============================================================
-  const BUILD_VERSION = 'v0.1.1';
+  const BUILD_VERSION = 'v0.1.9';
   document.querySelectorAll('.build-version').forEach(el => {
     el.textContent = BUILD_VERSION;
   });
@@ -1166,118 +1176,105 @@ body.cine-2d-active .cam-buttons { display: none; }
   // ============================================================
   const PEAK_CENTER_X    = -60;
   const PEAK_CENTER_Z    = 30;
-  const PEAK_BASE_R      = 25.0;    // 50m base diameter (wider for path readability)
-  const PEAK_HEIGHT      = 45.0;    // 45m tall
+  const PEAK_BASE_R      = 25.0;    // 50m base diameter
+  const PEAK_HEIGHT      = 32.0;    // 32m tall — slope 52° (above 50° cutoff)
   const PATH_TURNS       = 3;       // spiral makes three full revolutions
-  const PATH_WIDTH       = 3.0;     // walkable width in metres (wider than v1)
-  const PATH_RECESS      = 1.5;     // groove depth (deeper than v1)
-  const PATH_TRANS       = 0.7;     // edge transition zone — soft groove walls
-  const SUMMIT_R         = 3.0;     // flat summit platform radius (≈6m diameter)
+  const PATH_WIDTH       = 6.0;     // walkable width (wider for clarity)
+  const SUMMIT_R         = 7.0;     // 14m platform diameter
+  // Path entry angle (peak-local, radians). Points roughly TOWARD
+  // the wreck so the path mouth is visible from the player's spawn
+  // position. Wreck at world (8,-2), peak at (-60,30), so the
+  // peak→wreck direction is atan2(-32, 68) ≈ -0.44 rad.
+  const PATH_ENTRY_ANGLE = -0.44;
 
   // Surface elevation at world (x, z), in metres above the crater
   // floor datum. Three regimes:
   //   - inside SUMMIT_R: flat platform at PEAK_HEIGHT
-  //   - on the spiral path: recessed groove the player walks on
-  //   - on the cone proper: linear pyramid surface, steep
+  //   - on the spiral path: terraced flat shelf at the cone height
+  //     at the path's centerline radius for this angle
+  //   - elsewhere: smooth linear cone profile
   function peakHeight(x, z) {
     const dx = x - PEAK_CENTER_X;
     const dz = z - PEAK_CENTER_Z;
     const r  = Math.sqrt(dx*dx + dz*dz);
     if (r >= PEAK_BASE_R) return 0;
-    // Summit platform — flat top so the player has somewhere to
-    // stand and look out at the rim.
-    if (r <= SUMMIT_R) return PEAK_HEIGHT;
-    // Linear cone profile (pyramidal silhouette)
-    const t = r / PEAK_BASE_R;
-    const cone = PEAK_HEIGHT * (1 - t);
-    // Spiral path. Path goes from r=PEAK_BASE_R (height 0) to
-    // r=SUMMIT_R (height PEAK_HEIGHT) over PATH_TURNS revolutions.
-    // Path height interpolates linearly across this range so the
-    // climb rate is constant in radius — keeps the path's average
-    // slope below the slope cutoff.
-    const pathFrac = (r - SUMMIT_R) / (PEAK_BASE_R - SUMMIT_R);  // 0 at platform, 1 at base
-    const pathH    = PEAK_HEIGHT * (1 - pathFrac);
-    // Path angle at this radius (unwrapped; compared mod 2π below)
-    const theta     = Math.atan2(dz, dx);
-    const pathTheta = Math.PI * 2 * PATH_TURNS * pathFrac;
-    let delta = theta - pathTheta;
-    delta -= Math.PI * 2 * Math.floor((delta + Math.PI) / (Math.PI * 2));
-    const lateral = Math.abs(delta) * r;
-    if (lateral <= PATH_WIDTH * 0.5) {
-      // On the path — sit at path height, recessed below cone
-      return Math.min(pathH, cone) - PATH_RECESS * 0.6;
+    if (r <= SUMMIT_R)    return PEAK_HEIGHT;
+    const cone = PEAK_HEIGHT * (1 - r / PEAK_BASE_R);
+    // Path crosses every angle PATH_TURNS+1 times — once per
+    // winding from base to summit. Path is parametrized so theta(T)
+    // = PATH_ENTRY_ANGLE + 2π·N·T. Find the T values where
+    // theta(T) ≡ θ_query (mod 2π), keep T in [0, 1].
+    const theta    = Math.atan2(dz, dx);
+    const shifted  = theta - PATH_ENTRY_ANGLE;
+    const thetaN   = ((shifted % (Math.PI * 2)) + Math.PI * 2) % (Math.PI * 2);
+    const totalAng = Math.PI * 2 * PATH_TURNS;
+    let bestRP   = 0;
+    let bestDist = Infinity;
+    for (let k = 0; k <= PATH_TURNS; k++) {
+      const a = thetaN + Math.PI * 2 * k;
+      if (a > totalAng + 1e-6) break;
+      const pathFrac = a / totalAng;
+      const rP = PEAK_BASE_R - (PEAK_BASE_R - SUMMIT_R) * pathFrac;
+      const d  = Math.abs(r - rP);
+      if (d < bestDist) { bestDist = d; bestRP = rP; }
     }
-    if (lateral <= PATH_WIDTH * 0.5 + PATH_TRANS) {
-      // Transition zone — blend recess back to cone surface so
-      // the groove walls aren't razor-sharp
-      const blend    = (lateral - PATH_WIDTH * 0.5) / PATH_TRANS;
-      const recessed = Math.min(pathH, cone) - PATH_RECESS * 0.6;
-      return recessed + (cone - recessed) * blend;
+    if (bestDist <= PATH_WIDTH * 0.5) {
+      return PEAK_HEIGHT * (1 - bestRP / PEAK_BASE_R);
     }
     return cone;
   }
 
-  // Build the peak mesh. Polar grid centred on the apex, sampling
-  // peakHeight() at each vertex. Mesh adds per-vertex noise (radial
-  // and height) on the cone-side faces to give the chunky low-poly
-  // silhouette visible in the references. Path-side vertices keep
-  // tighter to the height function so the groove still reads clearly.
+  // Build the peak as a single BufferGeometry. Polar grid samples
+  // peakHeight() directly, so the terraced spiral path is part of
+  // the mesh — visible as flat shelves between cone slopes. The
+  // apex is built deliberately asymmetric: the centre vertex is
+  // off-axis and ring 0 (at SUMMIT_R) has independent radial +
+  // height jitter on every vertex, so the top reads as a rough
+  // chunky cylinder rather than a symmetric cone-with-platform.
   function buildCentralPeak() {
-    const SEGS         = 96;
-    const RINGS        = 32;
-    const FOOTPRINT_R  = PEAK_BASE_R + 0.5;
-    const positions    = [];
-    const indices      = [];
-    // Apex centre vertex (sampled at peak centre — sits on platform)
-    positions.push(0, peakHeight(PEAK_CENTER_X, PEAK_CENTER_Z), 0);
-    for (let ring = 1; ring <= RINGS; ring++) {
-      const t = ring / RINGS;
-      // Cluster rings near the centre (more detail high up where
-      // the spiral path is tighter)
-      const r = FOOTPRINT_R * (t * 0.55 + t * t * 0.45);
-      // Noise amplitude scales with ring (less near the apex/platform
-      // so the silhouette stays recognizable, more at the base).
-      const noiseScale = (ring < 4) ? 0.0 : Math.min(1, (ring - 3) / 6);
+    const SEGS  = 48;
+    const RINGS = 16;
+    const positions = [];
+    const indices   = [];
+    // Off-centre apex vertex — its X/Z offset breaks the four-fold
+    // visual symmetry that previously made the top read as a cross.
+    positions.push(0.7, PEAK_HEIGHT + 0.6, -1.1);
+    for (let ring = 0; ring <= RINGS; ring++) {
+      const tt = ring / RINGS;
+      const r_base = SUMMIT_R + (PEAK_BASE_R - SUMMIT_R) * tt;
       for (let i = 0; i < SEGS; i++) {
-        // Angular jitter — gentle
-        const aJit = (rng(ring * 100 + i + 0.31) - 0.5) * (Math.PI * 2 / SEGS) * 0.35;
+        // Small angular jitter only on cone body rings — no radial
+        // jitter, which used to push vertices across the path
+        // boundary and produce chaotic shelf/slope alternation.
+        const aJit = (rng(ring * 37 + i + 0.31) - 0.5) * (Math.PI * 2 / SEGS) * 0.20;
         const a = (i / SEGS) * Math.PI * 2 + aJit;
-        // Radial jitter — pushes vertices in/out for chunky silhouette.
-        // Magnitudes deliberately uneven so some "shoulders" extend
-        // outward more than others, reading as overhangs in profile.
-        const rJit = (rng(ring * 200 + i + 0.62) - 0.5) * 1.6 * noiseScale
-                   + Math.max(0, (rng(ring * 300 + i + 0.83) - 0.78)) * 4.0 * noiseScale;
-        const rr = Math.max(0, r + rJit);
-        const lx = Math.cos(a) * rr;
-        const lz = Math.sin(a) * rr;
-        const wx = PEAK_CENTER_X + lx;
-        const wz = PEAK_CENTER_Z + lz;
-        // Sample peakHeight at the JITTERED world position so the
-        // path still appears where it should geometrically. Then add
-        // height noise on top for chunky-block effect — but only on
-        // cone surface, not where the path passes through.
-        const baseY = peakHeight(wx, wz);
-        // Detect whether this vertex is on (or very near) the path.
-        // A small heuristic: compare to the smooth cone height — if
-        // baseY is significantly below it, we're in the groove.
-        const tNorm   = Math.min(1, rr / PEAK_BASE_R);
-        const smoothCone = (rr <= SUMMIT_R) ? PEAK_HEIGHT
-                          : PEAK_HEIGHT * (1 - tNorm);
-        const isPath = (smoothCone - baseY) > 0.4;
-        const yJit = isPath
-                   ? 0
-                   : (rng(ring * 400 + i + 0.17) - 0.5) * 1.2 * noiseScale;
-        positions.push(lx, baseY + yJit, lz);
+        let r_v, h_v;
+        if (ring === 0) {
+          // Apex ring — rough cylindrical edge. Independent radial
+          // (±1.5m) and height (around PEAK_HEIGHT, ±1.5m) jitter
+          // per vertex. peakHeight at r ≤ SUMMIT_R returns the flat
+          // PEAK_HEIGHT for collision, but the visible mesh is
+          // chunky and asymmetric. The player walks on the flat
+          // collision surface; mostly the cap pokes above it.
+          const rJit = (rng(i + 800) - 0.5) * 3.0;
+          const hJit = (rng(i + 820) - 0.5) * 3.0;
+          r_v = Math.max(4.0, SUMMIT_R + rJit);
+          h_v = PEAK_HEIGHT + 0.4 + hJit;
+        } else {
+          r_v = r_base;
+          const wx = PEAK_CENTER_X + Math.cos(a) * r_v;
+          const wz = PEAK_CENTER_Z + Math.sin(a) * r_v;
+          h_v = peakHeight(wx, wz);
+        }
+        positions.push(Math.cos(a) * r_v, h_v, Math.sin(a) * r_v);
       }
     }
-    // Centre fan (apex to first ring)
     for (let i = 0; i < SEGS; i++) {
       const i1 = 1 + i;
       const i2 = 1 + ((i + 1) % SEGS);
       indices.push(0, i2, i1);
     }
-    // Quad rings — outward-and-up winding
-    for (let ring = 0; ring < RINGS - 1; ring++) {
+    for (let ring = 0; ring < RINGS; ring++) {
       const a0 = 1 + ring * SEGS;
       const a1 = 1 + (ring + 1) * SEGS;
       for (let i = 0; i < SEGS; i++) {
@@ -1296,14 +1293,167 @@ body.cine-2d-active .cam-buttons { display: none; }
     return geom;
   }
 
-  const peakMat = regolith.clone();
-  peakMat.flatShading = true;
-  peakMat.needsUpdate = true;
+  // Build a thin overlay ribbon along the spiral path centerline.
+  // Sits on top of the cone mesh's terraced shelves with a tiny
+  // vertical lift to avoid z-fighting, painted with a lighter
+  // material so the path is clearly readable against the dark peak.
+  // Edges and height are clamped so the ribbon never drops below
+  // the floor at the entry or tunnels into the apex platform.
+  function buildPathOverlay() {
+    const NUM_STEPS   = 80;
+    const RIBBON_LIFT = 0.08;       // m above the cone-mesh shelf
+    const OVERLAY_W   = PATH_WIDTH - 0.6;
+    const T_END       = 0.85;        // stop short of the platform
+    const positions   = [];
+    const indices     = [];
+    for (let s = 0; s <= NUM_STEPS; s++) {
+      const T     = (s / NUM_STEPS) * T_END;
+      const r     = PEAK_BASE_R - (PEAK_BASE_R - SUMMIT_R) * T;
+      const theta = PATH_ENTRY_ANGLE + Math.PI * 2 * PATH_TURNS * T;
+      const cosT  = Math.cos(theta);
+      const sinT  = Math.sin(theta);
+      // Centerline cone height, clamped to floor (path entry at T=0
+      // is at h=0, so the lift keeps the ribbon visible there).
+      const hRaw  = PEAK_HEIGHT * (1 - r / PEAK_BASE_R);
+      const h     = Math.max(0, hRaw) + RIBBON_LIFT;
+      // Clamp edges so the ribbon stays within the cone footprint.
+      const rOut  = Math.min(PEAK_BASE_R,    r + OVERLAY_W * 0.5);
+      const rIn   = Math.max(SUMMIT_R + 0.3, r - OVERLAY_W * 0.5);
+      positions.push(cosT * rOut, h, sinT * rOut);   // outer edge
+      positions.push(cosT * rIn,  h, sinT * rIn);    // inner edge
+    }
+    for (let s = 0; s < NUM_STEPS; s++) {
+      const a0 = s * 2;
+      const a1 = a0 + 1;
+      const b0 = (s + 1) * 2;
+      const b1 = b0 + 1;
+      indices.push(a0, a1, b1);
+      indices.push(a0, b1, b0);
+    }
+    const geom = new THREE.BufferGeometry();
+    geom.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+    geom.setIndex(indices);
+    geom.computeVertexNormals();
+    return geom;
+  }
+
+
+  // Peak material — a couple shades darker than rockMid, so the
+  // cone reads as the darkest mass against the path (rockMid),
+  // which in turn is darker than the lightest boulders (rockLight).
+  // Three-tone palette: peak → path → boulders, dark to light.
+  const peakMat = new THREE.MeshPhongMaterial({
+    shininess: 0,
+    color: 0x6c7178,
+    flatShading: true
+  });
   const centralPeak = new THREE.Mesh(buildCentralPeak(), peakMat);
   centralPeak.position.set(PEAK_CENTER_X, -CRATER_DEPTH, PEAK_CENTER_Z);
   centralPeak.castShadow = true;
   centralPeak.receiveShadow = true;
   root.add(centralPeak);
+  cameraOccluders.push(centralPeak);   // pull cam in when peak blocks the shot
+
+  // Path overlay — thin lighter ribbon laid on top of the cone's
+  // terraced shelves. Uses rockLight against the dark peak so the
+  // spiral path reads clearly from a distance.
+  const pathOverlay = new THREE.Mesh(buildPathOverlay(), M.rockLight);
+  pathOverlay.position.set(PEAK_CENTER_X, -CRATER_DEPTH, PEAK_CENTER_Z);
+  pathOverlay.castShadow = false;
+  pathOverlay.receiveShadow = true;
+  root.add(pathOverlay);
+
+  // Stones lining the path edges. Walk the path centerline and
+  // place small stones along the outer (drop) edge mostly, with
+  // a few on the inner (cliff) edge. Each stone's height is queried
+  // from peakHeight() at its actual XZ position — so it sits on
+  // whatever real surface is underneath (cone slope, shelf, or
+  // floor at the path's foot), not on an assumed shelf height.
+  // Mix of rockLight and rockMid so the stones don't read as a
+  // uniform line — they look like loose debris, not paint markers.
+  const NUM_PATH_STONES = 56;
+  for (let s = 0; s < NUM_PATH_STONES; s++) {
+    const T     = (s + 0.5) / NUM_PATH_STONES;     // even spacing along path
+    const r     = PEAK_BASE_R - (PEAK_BASE_R - SUMMIT_R) * T;
+    const theta = PATH_ENTRY_ANGLE + Math.PI * 2 * PATH_TURNS * T;
+    // Most stones on outer edge (drop side); some on inner edge.
+    // Inset slightly so they sit ON the shelf, not at its edge.
+    const outerSide = rng(s + 700) < 0.72;
+    const edgeR = outerSide
+                ? r + PATH_WIDTH * 0.5 - 0.4
+                : r - PATH_WIDTH * 0.5 + 0.4;
+    const tangentJitter = (rng(s + 710) - 0.5) * 0.6;
+    const cosT = Math.cos(theta);
+    const sinT = Math.sin(theta);
+    const tx = -sinT, tz = cosT;
+    const lx = cosT * edgeR + tx * tangentJitter;
+    const lz = sinT * edgeR + tz * tangentJitter;
+    const wx = PEAK_CENTER_X + lx;
+    const wz = PEAK_CENTER_Z + lz;
+    // Sample the actual peak surface at this stone's footprint,
+    // clamped to floor — never below 0.
+    const yPath = Math.max(0, peakHeight(wx, wz));
+    const sz   = 0.4 + rng(s + 720) * 0.6;       // 0.4 .. 1.0m
+    const mat  = (rng(s + 730) < 0.30) ? M.rockMid : M.rockLight;
+    const stone = new THREE.Mesh(new THREE.IcosahedronGeometry(sz, 0), mat);
+    stone.scale.set(
+      0.7 + rng(s + 740) * 0.6,
+      0.5 + rng(s + 750) * 0.5,
+      0.7 + rng(s + 760) * 0.6
+    );
+    stone.rotation.set(
+      rng(s + 770) * Math.PI * 2,
+      rng(s + 780) * Math.PI * 2,
+      rng(s + 790) * Math.PI * 2
+    );
+    // Stones sit with ~30% of their size buried, so they read as
+    // settled into the surface rather than perched on top of it.
+    stone.position.set(wx, -CRATER_DEPTH + yPath + sz * 0.3, wz);
+    stone.castShadow = true;
+    stone.receiveShadow = true;
+    root.add(stone);
+  }
+
+  // Boulders hand-placed around the peak's base — bigger anchor
+  // chunks scattered just outside PEAK_BASE_R. Six rockLight,
+  // six rockMid, alternating tonally.
+  const peakBaseBoulders = [
+    // [angleRad, radialOffset beyond PEAK_BASE_R, size, light?]
+    [ 0.30,  1.5, 2.4, true  ],
+    [ 0.85,  3.2, 1.8, false ],
+    [ 1.40,  2.0, 3.0, true  ],
+    [ 1.95,  4.0, 1.6, false ],
+    [ 2.60,  1.0, 2.2, false ],
+    [ 3.15,  3.5, 2.7, true  ],
+    [ 3.80,  1.8, 1.4, true  ],
+    [ 4.35,  2.5, 2.5, false ],
+    [ 4.95,  4.2, 1.9, true  ],
+    [ 5.55,  1.2, 2.8, false ],
+    [ 6.10,  3.0, 1.7, true  ],
+    [-0.40,  2.2, 2.1, false ],
+  ];
+  for (let i = 0; i < peakBaseBoulders.length; i++) {
+    const [ang, off, sz, light] = peakBaseBoulders[i];
+    const r  = PEAK_BASE_R + off;
+    const x  = PEAK_CENTER_X + Math.cos(ang) * r;
+    const z  = PEAK_CENTER_Z + Math.sin(ang) * r;
+    const mat = light ? M.rockLight : M.rockMid;
+    const m  = new THREE.Mesh(new THREE.IcosahedronGeometry(sz, 0), mat);
+    m.scale.set(
+      0.85 + rng(i + 91) * 0.5,
+      0.70 + rng(i + 92) * 0.4,
+      0.85 + rng(i + 93) * 0.5
+    );
+    m.rotation.set(
+      rng(i + 94) * Math.PI * 2,
+      rng(i + 95) * Math.PI * 2,
+      rng(i + 96) * Math.PI * 2
+    );
+    m.position.set(x, -CRATER_DEPTH + sz * 0.3, z);
+    m.castShadow = true;
+    m.receiveShadow = true;
+    root.add(m);
+  }
 
   // ============================================================
   // BOULDER GENERATOR
@@ -2360,9 +2510,10 @@ body.cine-2d-active .cam-buttons { display: none; }
   // CAMERA — third-person over-shoulder with mouse-orbit
   // ============================================================
   let camYaw = 0;
-  let camPitch = -0.18;
-  let camDist = 9.0;
-  const CAM_HEIGHT = 0.9;
+  let camPitch = -0.30;     // tilted down a bit more for elevated framing
+  let camDist = 14.0;       // 5m further out than before — wider framing,
+                            // closer to A Short Hike's chase view
+  const CAM_HEIGHT = 1.8;   // raised so the camera looks down at the scene
   const camLerpTarget = new THREE.Vector3();
   const lookTarget = new THREE.Vector3();
 
@@ -5950,7 +6101,7 @@ body.cine-2d-active .cam-buttons { display: none; }
   const OXYGEN_REFILL_RADIUS = 4.0;               // m — "at the wreck" zone
   const OXYGEN_DRAIN_RATE    = 0.4;               // % per second, constant everywhere
   const OXYGEN_REFILL_RATE   = 4.0;               // % per second at source (gentle)
-  const OXYGEN_CAPACITY_START = 25;               // starting tank ceiling — broken
+  const OXYGEN_CAPACITY_START = 50;               // starting tank ceiling — broken
   const oxygen = {
     percent: OXYGEN_CAPACITY_START,    // current oxygen, 0 .. capacity
     capacity: OXYGEN_CAPACITY_START,   // current tank ceiling
