@@ -445,7 +445,7 @@ body.cine-2d-active .cam-buttons { display: none; }
   // free — semver, date, or whatever's useful. The whole point is
   // that the tag is different from the previous deploy.
   // ============================================================
-  const BUILD_VERSION = 'v0.1.0';
+  const BUILD_VERSION = 'v0.1.3';
   document.querySelectorAll('.build-version').forEach(el => {
     el.textContent = BUILD_VERSION;
   });
@@ -1148,106 +1148,166 @@ body.cine-2d-active .cam-buttons { display: none; }
   root.add(innerSurface);
 
   // ============================================================
-  // CENTRAL PEAK — a tall narrow pyramid with a three-turn spiral
-  // path cut into its surface. The cone itself is too steep to climb
-  // directly (~69° slope); the path is the only practical route to
-  // the summit. Reference: Oricut-style low-poly mountain with
-  // visible polygon facets and a switchback trail wrapping the mass.
+  // CENTRAL PEAK — a wide chunky pyramid with a three-turn spiral
+  // path cut into its surface and a flat summit platform. The cone
+  // proper is too steep to walk straight up (~61° slope; player
+  // physics' 50° cutoff blocks it); the path is the only practical
+  // route to the summit. Reference: Oricut-style low-poly mountain
+  // with visible polygon facets and a switchback trail.
   //
   // The peak is real ground: getGroundY() consults peakHeight(x,z)
   // and returns the higher of the floor heightfield or the peak
-  // surface, so the player walks on the cone (where they can) and
-  // along the path (where they have to).
+  // surface, so the player walks on the cone (where slope allows)
+  // and along the path (where they have to). peakHeight() itself
+  // is smooth — the visible chunky low-poly silhouette comes from
+  // per-vertex mesh noise, not from the underlying height function.
+  // Keeping peakHeight smooth keeps walking and the slope cutoff
+  // predictable.
   // ============================================================
-  const PEAK_CENTER_X = -60;
-  const PEAK_CENTER_Z = 30;
-  const PEAK_BASE_R   = 17.5;     // 35m base diameter
-  const PEAK_HEIGHT   = 45;       // 45m tall
-  const PATH_TURNS    = 3;        // spiral makes three full revolutions
-  const PATH_WIDTH    = 2.0;      // walkable width in metres
-  const PATH_RECESS   = 0.9;      // path is ~90cm sunken into cone surface
-  const PATH_TRANS    = 0.5;      // edge transition width — softens the groove walls
+  const PEAK_CENTER_X    = -60;
+  const PEAK_CENTER_Z    = 30;
+  const PEAK_BASE_R      = 40.0;    // 80m base diameter — wide stout pyramid
+  const PEAK_HEIGHT      = 40.0;    // 40m tall (≈2:1 base:height ratio per ref)
+  const PATH_TURNS       = 3;       // spiral makes three full revolutions
+  const PATH_WIDTH       = 3.5;     // walkable width in metres
+  const PATH_RECESS      = 1.6;     // groove depth
+  const PATH_TRANS       = 0.8;     // edge transition zone
+  const SUMMIT_R         = 5.0;     // 10m platform diameter — fits the dish
+
+  // Chunk colliders. Populated by buildPeakChunks() after all chunks
+  // are placed (must happen after, otherwise chunks would stack on
+  // each other during the placement loop). Each entry is
+  // { cx, cz, r, topY } in peak-local frame; consulted by
+  // peakHeight() to give chunks vertical-wall collision behaviour.
+  let _peakColliders = null;
 
   // Surface elevation at world (x, z), in metres above the crater
-  // floor datum. Returns 0 outside the footprint. Two regimes:
+  // floor datum. Four regimes:
+  //   - inside SUMMIT_R: flat platform at PEAK_HEIGHT
   //   - on the spiral path: recessed groove the player walks on
-  //   - on the cone proper: linear pyramid surface, very steep
+  //   - on the cone proper: linear pyramid surface, steep
+  //   - inside a chunk's footprint: chunk top (overrides cone)
   function peakHeight(x, z) {
     const dx = x - PEAK_CENTER_X;
     const dz = z - PEAK_CENTER_Z;
     const r  = Math.sqrt(dx*dx + dz*dz);
-    if (r >= PEAK_BASE_R) return 0;
-    // Linear cone profile (pyramidal silhouette)
-    const t = r / PEAK_BASE_R;
-    const cone = PEAK_HEIGHT * (1 - t);
-    // Spiral path angle at this radius. Path starts at θ=0 at the
-    // base (r=R) and makes PATH_TURNS full revolutions by the time
-    // it reaches the apex (r=0). Resulting angle is unbounded; we
-    // compare modulo 2π below.
-    const theta     = Math.atan2(dz, dx);
-    const pathTheta = Math.PI * 2 * PATH_TURNS * (1 - t);
-    // Shortest signed angular distance to the path centerline,
-    // wrapped to (-π, π].
-    let delta = theta - pathTheta;
-    delta -= Math.PI * 2 * Math.floor((delta + Math.PI) / (Math.PI * 2));
-    // Convert to lateral arc-length distance (path width is
-    // measured perpendicular to the climb direction, which at small
-    // radii is dominated by tangential motion — arc length is the
-    // right metric here).
-    const lateral = Math.abs(delta) * r;
-    if (lateral <= PATH_WIDTH * 0.5) {
-      // On the path — recess into cone surface
-      return Math.max(0, cone - PATH_RECESS);
+    if (r >= PEAK_BASE_R + 4) return 0;     // chunks may extend slightly past base
+    // Summit platform — flat top so the player has somewhere to
+    // stand and look out at the rim.
+    let h;
+    if (r <= SUMMIT_R) {
+      h = PEAK_HEIGHT;
+    } else if (r >= PEAK_BASE_R) {
+      h = 0;
+    } else {
+      // Linear cone profile (pyramidal silhouette)
+      const t = r / PEAK_BASE_R;
+      const cone = PEAK_HEIGHT * (1 - t);
+      // Spiral path. Path goes from r=PEAK_BASE_R (height 0) to
+      // r=SUMMIT_R (height PEAK_HEIGHT) over PATH_TURNS revolutions.
+      // Path height interpolates linearly across this range so the
+      // climb rate is constant in radius — keeps the path's average
+      // slope below the slope cutoff.
+      const pathFrac = (r - SUMMIT_R) / (PEAK_BASE_R - SUMMIT_R);  // 0 at platform, 1 at base
+      const pathH    = PEAK_HEIGHT * (1 - pathFrac);
+      // Path angle at this radius (unwrapped; compared mod 2π below)
+      const theta     = Math.atan2(dz, dx);
+      const pathTheta = Math.PI * 2 * PATH_TURNS * pathFrac;
+      let delta = theta - pathTheta;
+      delta -= Math.PI * 2 * Math.floor((delta + Math.PI) / (Math.PI * 2));
+      const lateral = Math.abs(delta) * r;
+      if (lateral <= PATH_WIDTH * 0.5) {
+        // On the path — sit at path height, recessed below cone
+        h = Math.min(pathH, cone) - PATH_RECESS * 0.6;
+      } else if (lateral <= PATH_WIDTH * 0.5 + PATH_TRANS) {
+        // Transition zone — blend recess back to cone surface so
+        // the groove walls aren't razor-sharp
+        const blend    = (lateral - PATH_WIDTH * 0.5) / PATH_TRANS;
+        const recessed = Math.min(pathH, cone) - PATH_RECESS * 0.6;
+        h = recessed + (cone - recessed) * blend;
+      } else {
+        h = cone;
+      }
     }
-    if (lateral <= PATH_WIDTH * 0.5 + PATH_TRANS) {
-      // Transition zone — blend recess back to cone surface so the
-      // groove walls aren't razor-sharp
-      const blend = (lateral - PATH_WIDTH * 0.5) / PATH_TRANS;
-      const recessed = Math.max(0, cone - PATH_RECESS);
-      return recessed + (cone - recessed) * blend;
+    // Chunk colliders. Each chunk is approximated as a vertical
+    // cylinder (cx, cz, r) with flat top topY. If the query point
+    // is inside any chunk's footprint, return the chunk's top.
+    // The slope cutoff in updatePlayer sees the resulting vertical
+    // discontinuity as too-steep and pushes the player away — so
+    // chunks read as solid obstacles rather than instant elevators.
+    if (_peakColliders) {
+      const lx = x - PEAK_CENTER_X;
+      const lz = z - PEAK_CENTER_Z;
+      for (let i = 0; i < _peakColliders.length; i++) {
+        const c = _peakColliders[i];
+        const cdx = lx - c.cx;
+        const cdz = lz - c.cz;
+        if (cdx*cdx + cdz*cdz < c.r * c.r) {
+          if (c.topY > h) h = c.topY;
+        }
+      }
     }
-    return cone;
+    return h;
   }
 
   // Build the peak mesh. Polar grid centred on the apex, sampling
-  // peakHeight() at each vertex. Higher angular resolution than
-  // the previous multi-summit version because the spiral path needs
-  // fine sampling to render cleanly — at ~2m wide and a 17.5m base,
-  // the path occupies ~13° of arc, so 64 segments (5.6° each) gives
-  // 2-3 vertices across the path at the base and is denser higher up
-  // where r is smaller.
+  // peakHeight() at each vertex. Mesh adds per-vertex noise (radial
+  // and height) on the cone-side faces to give the chunky low-poly
+  // silhouette visible in the references. Path-side vertices keep
+  // tighter to the height function so the groove still reads clearly.
   function buildCentralPeak() {
-    const SEGS         = 64;
-    const RINGS        = 28;
-    const FOOTPRINT_R  = PEAK_BASE_R + 0.5;   // small overlap with floor
+    const SEGS         = 96;
+    const RINGS        = 32;
+    const FOOTPRINT_R  = PEAK_BASE_R + 0.5;
     const positions    = [];
     const indices      = [];
-    // Centre vertex (apex)
+    // Apex centre vertex (sampled at peak centre — sits on platform)
     positions.push(0, peakHeight(PEAK_CENTER_X, PEAK_CENTER_Z), 0);
     for (let ring = 1; ring <= RINGS; ring++) {
-      const t  = ring / RINGS;
-      // Quadratic bias so rings cluster near the centre — more
-      // detail high up where the spiral path is tightest.
-      const r  = FOOTPRINT_R * (t * 0.55 + t * t * 0.45);
+      const t = ring / RINGS;
+      // Cluster rings near the centre (more detail high up where
+      // the spiral path is tighter)
+      const r = FOOTPRINT_R * (t * 0.55 + t * t * 0.45);
+      // Noise amplitude scales with ring (less near the apex/platform
+      // so the silhouette stays recognizable, more at the base).
+      const noiseScale = (ring < 4) ? 0.0 : Math.min(1, (ring - 3) / 6);
       for (let i = 0; i < SEGS; i++) {
-        // Tiny angular jitter only — too much would smear the path
-        // edges. Just enough to break the perfectly-circular ring.
-        const aJit = (rng(ring * 100 + i + 0.31) - 0.5) * (Math.PI * 2 / SEGS) * 0.20;
+        // Mild angular jitter
+        const aJit = (rng(ring * 100 + i + 0.31) - 0.5) * (Math.PI * 2 / SEGS) * 0.25;
         const a = (i / SEGS) * Math.PI * 2 + aJit;
-        const lx = Math.cos(a) * r;
-        const lz = Math.sin(a) * r;
+        // Modest radial jitter — chunks do the heavy lifting on
+        // silhouette irregularity. Mesh just needs to not look perfect.
+        const rJit = (rng(ring * 200 + i + 0.62) - 0.5) * 0.8 * noiseScale;
+        const rr = Math.max(0, r + rJit);
+        const lx = Math.cos(a) * rr;
+        const lz = Math.sin(a) * rr;
         const wx = PEAK_CENTER_X + lx;
         const wz = PEAK_CENTER_Z + lz;
-        positions.push(lx, peakHeight(wx, wz), lz);
+        // Sample peakHeight at the JITTERED world position so the
+        // path still appears where it should geometrically. Then add
+        // height noise on top for chunky-block effect — but only on
+        // cone surface, not where the path passes through.
+        const baseY = peakHeight(wx, wz);
+        // Detect whether this vertex is on (or very near) the path.
+        // A small heuristic: compare to the smooth cone height — if
+        // baseY is significantly below it, we're in the groove.
+        const tNorm   = Math.min(1, rr / PEAK_BASE_R);
+        const smoothCone = (rr <= SUMMIT_R) ? PEAK_HEIGHT
+                          : PEAK_HEIGHT * (1 - tNorm);
+        const isPath = (smoothCone - baseY) > 0.4;
+        const yJit = isPath
+                   ? 0
+                   : (rng(ring * 400 + i + 0.17) - 0.5) * 0.5 * noiseScale;
+        positions.push(lx, baseY + yJit, lz);
       }
     }
-    // Centre fan — apex (vertex 0) to first ring
+    // Centre fan (apex to first ring)
     for (let i = 0; i < SEGS; i++) {
       const i1 = 1 + i;
       const i2 = 1 + ((i + 1) % SEGS);
       indices.push(0, i2, i1);
     }
-    // Quad rings — same outward-and-up winding as before
+    // Quad rings — outward-and-up winding
     for (let ring = 0; ring < RINGS - 1; ring++) {
       const a0 = 1 + ring * SEGS;
       const a1 = 1 + (ring + 1) * SEGS;
@@ -1267,6 +1327,145 @@ body.cine-2d-active .cam-buttons { display: none; }
     return geom;
   }
 
+  // Chunky decoration blocks. The smooth cone needs angular shoulders
+  // sitting on its faces between the path windings to read as a
+  // chunky low-poly mountain rather than a smooth pyramid. Each
+  // block is a BoxGeometry with non-uniform scale and random
+  // rotation, half-buried in the cone surface so only the upper
+  // portion reads as a protruding shoulder. Blocks rejected if too
+  // close to the path centerline so they don't obstruct walking.
+  // All merged into one BufferGeometry for a single draw call.
+  function buildPeakChunks() {
+    const NUM_CHUNKS  = 140;        // try-count; some get rejected
+    const positions   = [];
+    const indices     = [];
+    const colliders   = [];         // committed to _peakColliders at end
+    let vertOffset    = 0;
+
+    // Box corners (unit cube, half-extents). Apply per-chunk scale
+    // and rotation, then translate to surface position.
+    const cornersTpl = [
+      [-1, -1, -1], [ 1, -1, -1], [ 1,  1, -1], [-1,  1, -1],
+      [-1, -1,  1], [ 1, -1,  1], [ 1,  1,  1], [-1,  1,  1],
+    ];
+    // Box face triangulation (12 triangles, outward-facing)
+    const boxTris = [
+      [0, 1, 2], [0, 2, 3],   // -Z face
+      [4, 6, 5], [4, 7, 6],   // +Z face
+      [0, 3, 7], [0, 7, 4],   // -X face
+      [1, 5, 6], [1, 6, 2],   // +X face
+      [0, 4, 5], [0, 5, 1],   // -Y face
+      [3, 2, 6], [3, 6, 7],   // +Y face
+    ];
+
+    for (let i = 0; i < NUM_CHUNKS; i++) {
+      const angle = rng(i * 7.13)  * Math.PI * 2;
+      // Bias t toward middle and lower regions — fewer chunks near
+      // the apex, denser at the chunky shoulders mid-cone.
+      const tRaw  = rng(i * 11.7);
+      const t     = 0.15 + tRaw * 0.75;       // restrict to (0.15, 0.9)
+      const rRange = PEAK_BASE_R - SUMMIT_R - 2.0;
+      const r      = SUMMIT_R + 1.0 + rRange * t;
+
+      // Reject if too close to the path centerline at this radius.
+      const pathFrac  = (r - SUMMIT_R) / (PEAK_BASE_R - SUMMIT_R);
+      const pathTheta = Math.PI * 2 * PATH_TURNS * pathFrac;
+      let delta = angle - pathTheta;
+      delta -= Math.PI * 2 * Math.floor((delta + Math.PI) / (Math.PI * 2));
+      const lateral = Math.abs(delta) * r;
+      // Buffer wider than the height-function path so chunks never
+      // overhang the walkable surface.
+      if (lateral < (PATH_WIDTH * 0.5) + 1.8) continue;
+
+      // Surface position (peak-local frame; peak group is translated
+      // to (PEAK_CENTER_X, -CRATER_DEPTH, PEAK_CENTER_Z))
+      const lx     = Math.cos(angle) * r;
+      const lz     = Math.sin(angle) * r;
+      const wx     = PEAK_CENTER_X + lx;
+      const wz     = PEAK_CENTER_Z + lz;
+      const baseY  = peakHeight(wx, wz);
+
+      // Chunk size — three rough categories, weighted toward medium
+      const cat = rng(i * 13.31);
+      let sx, sy, sz;
+      if (cat < 0.55) {
+        // Medium block
+        sx = 1.5 + rng(i * 17.7) * 2.5;
+        sy = 1.2 + rng(i * 19.3) * 2.0;
+        sz = 1.5 + rng(i * 23.5) * 2.5;
+      } else if (cat < 0.85) {
+        // Big shoulder block — fewer, larger, visible from afar
+        sx = 3.0 + rng(i * 29.1) * 3.5;
+        sy = 2.0 + rng(i * 31.7) * 2.5;
+        sz = 3.0 + rng(i * 37.3) * 3.5;
+      } else {
+        // Small rubble around the bigger chunks
+        sx = 0.6 + rng(i * 41.9) * 0.9;
+        sy = 0.5 + rng(i * 43.7) * 0.7;
+        sz = 0.6 + rng(i * 47.1) * 0.9;
+      }
+
+      // Bury ~35% of height into surface
+      const buryDepth = sy * 0.35;
+      const cy        = baseY + sy * 0.5 - buryDepth;
+
+      // Per-chunk rotation: full Y spin, slight X/Z tilt
+      const rotY = rng(i * 53.1) * Math.PI * 2;
+      const rotX = (rng(i * 59.7) - 0.5) * 0.5;
+      const rotZ = (rng(i * 61.3) - 0.5) * 0.5;
+      const cY = Math.cos(rotY), sY = Math.sin(rotY);
+      const cX = Math.cos(rotX), sX = Math.sin(rotX);
+      const cZ = Math.cos(rotZ), sZ = Math.sin(rotZ);
+
+      // scale × Rx × Rz × Ry, then translate
+      for (let k = 0; k < 8; k++) {
+        const c = cornersTpl[k];
+        let x = c[0] * sx * 0.5;
+        let y = c[1] * sy * 0.5;
+        let z = c[2] * sz * 0.5;
+        // Rx
+        let y1 = y * cX - z * sX;
+        let z1 = y * sX + z * cX;
+        y = y1; z = z1;
+        // Rz
+        let x2 = x * cZ - y * sZ;
+        let y2 = x * sZ + y * cZ;
+        x = x2; y = y2;
+        // Ry
+        let x3 = x * cY + z * sY;
+        let z3 = -x * sY + z * cY;
+        x = x3; z = z3;
+        positions.push(lx + x, cy + y, lz + z);
+      }
+      for (let t2 = 0; t2 < boxTris.length; t2++) {
+        const tri = boxTris[t2];
+        indices.push(vertOffset + tri[0],
+                     vertOffset + tri[1],
+                     vertOffset + tri[2]);
+      }
+      vertOffset += 8;
+
+      // Register collider. Effective radius is between the inscribed
+      // and circumscribed footprint radii of the rotated box —
+      // 0.45×max(sx, sz) feels solid without overlapping neighbours.
+      // topY is the chunk's flat-top elevation in peak-local frame
+      // (same datum as peakHeight returns).
+      const colliderR = Math.max(sx, sz) * 0.45;
+      const topY      = baseY + sy - buryDepth;
+      colliders.push({ cx: lx, cz: lz, r: colliderR, topY: topY });
+    }
+
+    const geom = new THREE.BufferGeometry();
+    geom.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+    geom.setIndex(indices);
+    geom.computeVertexNormals();
+    // Commit colliders only after all chunks placed — peakHeight()
+    // calls during the loop see the smooth cone, so chunks don't
+    // stack on top of each other during placement.
+    _peakColliders = colliders;
+    return geom;
+  }
+
   const peakMat = regolith.clone();
   peakMat.flatShading = true;
   peakMat.needsUpdate = true;
@@ -1275,6 +1474,14 @@ body.cine-2d-active .cam-buttons { display: none; }
   centralPeak.castShadow = true;
   centralPeak.receiveShadow = true;
   root.add(centralPeak);
+
+  // Chunky decoration blocks — scattered on the cone faces between
+  // path windings. Same material, same transform as the peak.
+  const peakChunks = new THREE.Mesh(buildPeakChunks(), peakMat);
+  peakChunks.position.set(PEAK_CENTER_X, -CRATER_DEPTH, PEAK_CENTER_Z);
+  peakChunks.castShadow = true;
+  peakChunks.receiveShadow = true;
+  root.add(peakChunks);
 
   // ============================================================
   // BOULDER GENERATOR
@@ -2026,6 +2233,35 @@ body.cine-2d-active .cam-buttons { display: none; }
     const targetSpeed = input.run ? RUN_SPEED : WALK_SPEED;
     const accel = player.grounded ? ACCEL_GROUND : ACCEL_AIR;
 
+    // Slope check — sample the local gradient via finite differences
+    // on getGroundY. If the slope exceeds the cutoff, the surface
+    // is too steep to walk on and the astronaut slides down the
+    // gradient. This is what makes the central peak's cone face
+    // unclimbable except via the spiral path: cone is ~61°, cutoff
+    // is 50°, path is ≤41° so path-walking still works.
+    const SLOPE_CUTOFF = Math.PI / 180 * 50;
+    let tooSteep = false;
+    let slideX = 0, slideZ = 0;
+    if (player.grounded) {
+      const eps = 0.6;
+      const yE = shackletonScene.getGroundY(player.pos.x + eps, player.pos.z);
+      const yW = shackletonScene.getGroundY(player.pos.x - eps, player.pos.z);
+      const yN = shackletonScene.getGroundY(player.pos.x, player.pos.z + eps);
+      const yS = shackletonScene.getGroundY(player.pos.x, player.pos.z - eps);
+      const gradX = (yE - yW) / (2 * eps);
+      const gradZ = (yN - yS) / (2 * eps);
+      const slopeMag = Math.hypot(gradX, gradZ);
+      const slopeAngle = Math.atan(slopeMag);
+      if (slopeAngle > SLOPE_CUTOFF) {
+        tooSteep = true;
+        // Slide down the gradient. Down-gradient direction is
+        // -gradient normalized. (Gradient points uphill; we want
+        // the unit vector pointing downhill.)
+        slideX = -gradX / slopeMag;
+        slideZ = -gradZ / slopeMag;
+      }
+    }
+
     // Pure-back intent: only back arrow / S held, no strafe. In that
     // case we walk backward in the astronaut's CURRENT facing direction
     // instead of pivoting him to face away from the camera. The pivot
@@ -2041,6 +2277,27 @@ body.cine-2d-active .cam-buttons { display: none; }
       const friction = Math.exp(-GRIP * 1.5 * dt);
       player.vel.x *= friction;
       player.vel.z *= friction;
+    } else if (tooSteep) {
+      // Slope is too steep to walk on. Player input is overridden;
+      // velocity accelerates downhill at a rate proportional to
+      // slope steepness. Friction is reduced (sliding, not gripping).
+      const slideAccel = GRAVITY * 4.0;          // fast accumulation, low gravity
+      player.vel.x += slideX * slideAccel * dt;
+      player.vel.z += slideZ * slideAccel * dt;
+      // Cap slide speed so it doesn't become absurd
+      const maxSlide = RUN_SPEED * 1.4;
+      const speed = Math.hypot(player.vel.x, player.vel.z);
+      if (speed > maxSlide) {
+        player.vel.x *= maxSlide / speed;
+        player.vel.z *= maxSlide / speed;
+      }
+      // Face downhill so the walk anim reads as motion forward
+      // along the slide direction, not sideways
+      const targetHeading = Math.atan2(slideX, slideZ);
+      let delta = targetHeading - player.heading;
+      while (delta > Math.PI) delta -= Math.PI * 2;
+      while (delta < -Math.PI) delta += Math.PI * 2;
+      player.heading += delta * Math.min(1, dt * TURN_SPEED * 1.5);
     } else if (pureBack) {
       // Walk backward in astronaut's local frame. Heading unchanged;
       // the camera-follow code (separately) lerps its target to
